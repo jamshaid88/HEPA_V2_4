@@ -1,8 +1,4 @@
 #include <Arduino.h>
-/*******************************************************************************
-   Arduino_GFX setting
-   Arduino Nano, Micro and more: CS:  9, DC:  8, RST:  7, BL:  6
- ******************************************************************************/
 #include <Arduino_GFX_Library.h>
 //#include <EEPROM.h>
 #include "PCF8574.h"
@@ -532,9 +528,28 @@ float AcsValueF = 0.0;
 static unsigned long lastSleepToggle = 0;
 const unsigned long sleepDebounceTime = 300; // 300ms debounce
 
-// Function declarations
+// Function declarations************************************************************************************************
+void initButtons(void); 
 void Enable_Timer0(void);
 void dispSegment(int);
+void init_pcf(void);
+CRGB getFadeColor(int aqi);
+void onDisp(void);
+void onDisp_power_on(void);
+void offDisp(void);
+int calculateAQI(uint16_t pm25);
+void startFadeToColor(CRGB targetColor);
+void zeroDetect_ISR();
+boolean readPMSdata(Stream *s);
+void set_LED_Speed(unsigned char uc1);
+void set_LED_Auto(bool b1);
+void play_menu_down(void);
+void play_menu_up(void);
+void play_device_off(void);
+void play_device_on(void);
+void LEDs_Restore(void);
+// Function declarations************************************************************************************************
+
 
 struct pms5003data {
   uint16_t framelen;
