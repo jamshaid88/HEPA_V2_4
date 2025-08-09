@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"name": "HEPA_V2_4",
+			"path": ".."
+		}
+	],
+	"settings": {
+		"CodeGPT.apiKey": "Claude Code"
+	}
+}
