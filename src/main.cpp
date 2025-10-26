@@ -31,9 +31,6 @@ Arduino_GFX *gfx = new Arduino_GC9A01(bus, 7 /* RST */, 0 /* rotation */, true /
 
 // Set i2c address
 PCF8574 pcf8574(0x20);
-// PCF8574 pcf8574(0x38);
-
-// #define MOTOR_SPEED_PIN 5 // PCF8574 Pin P5
 
 #define ZERO_DETECT_PIN 2    // the number of the zeroDetct pin.
 #define PIN_PWM 3            // Motor PWM Pin
