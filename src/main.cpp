@@ -1,8 +1,18 @@
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
-//#include <EEPROM.h>
+#include <EEPROM.h>
 #include "PCF8574.h"
 #include "FastLED.h"
+
+
+// EEPROM state storage
+#define EEPROM_ADDR_MODE   0   // 0=OFF, 1=AUTO, 2=MANUAL
+#define EEPROM_ADDR_SPEED  1   // 0–3 fan speed
+
+// mode values for readability
+#define MODE_OFF    0
+#define MODE_AUTO   1
+#define MODE_MANUAL 2
 
 //NeoPixle definations
 #define NUM_LEDS 2
@@ -525,11 +535,13 @@ uint8_t red, green, blue;
 
 float AcsValueF = 0.0;
 
-static unsigned long lastSleepToggle = 0;
+//static unsigned long lastSleepToggle = 0;
 const unsigned long sleepDebounceTime = 300; // 300ms debounce
 
 // Function declarations************************************************************************************************
 void initButtons(void); 
+void saveStateToEEPROM(byte mode, byte speed);
+void restoreState();
 void Enable_Timer0(void);
 void dispSegment(int);
 void init_pcf(void);
@@ -539,7 +551,7 @@ void onDisp_power_on(void);
 void offDisp(void);
 int calculateAQI(uint16_t pm25);
 void startFadeToColor(CRGB targetColor);
-void zeroDetect_ISR();
+//void zeroDetect_ISR();
 boolean readPMSdata(Stream *s);
 void set_LED_Speed(unsigned char uc1);
 void set_LED_Auto(bool b1);
@@ -609,20 +621,20 @@ ISR(PCINT2_vect) {
 
 // Timer0 ISR after every 1mSec
 ISR(TIMER0_COMPA_vect) {
-  if (flagON) { // For Motor Control Only
-    pwmCount--;
-    if (pwmCount <= 0) {
-      digitalWrite(PIN_PWM, LOW);     flagON = false;
-    }
-//    else if (pwmCount <= fanSpeed * (1)) {
-    else if (pwmCount == ((unsigned char)(floor(fanSpeed * 0.9)))) {
-      digitalWrite(PIN_PWM, HIGH);
+//   if (flagON) { // For Motor Control Only
+//     pwmCount--;
+//     if (pwmCount <= 0) {
+//       digitalWrite(PIN_PWM, LOW);     flagON = false;
+//     }
+// //    else if (pwmCount <= fanSpeed * (1)) {
+//     else if (pwmCount == ((unsigned char)(floor(fanSpeed * 0.9)))) {
+//       digitalWrite(PIN_PWM, HIGH);
 
-    }
-    else {
-      digitalWrite(PIN_PWM, LOW);
-    }
-  }
+//     }
+//     else {
+//       digitalWrite(PIN_PWM, LOW);
+//     }
+//   }
 
   if (sysState == STATE_POWER_ON) {
     if (flagTimerSet) {
@@ -755,17 +767,18 @@ void setup(void)
 #endif
   offDisp();
   Serial.begin(9600);
+  restoreState();
   //  pcf8574.begin(); // Initialize the PCF8574
   //   pcf8574.pinMode(P5, OUTPUT);
   //   pcf8574.digitalWrite(P5, HIGH);
 
 
   // pcf8574.digitalWrite(MOTOR_SPEED_PIN, LOW); // Ensure it starts LOW
-  pinMode(ZERO_DETECT_PIN, INPUT);  // initialize the zeroDetct pin as an input:
-  pinMode(PIN_PWM, OUTPUT);  // initialize the PWM pin as an input:
-  digitalWrite(PIN_PWM, LOW);
+  //pinMode(ZERO_DETECT_PIN, INPUT);  // initialize the zeroDetct pin as an input:
+  //pinMode(PIN_PWM, OUTPUT);  // initialize the PWM pin as an input:
+  //digitalWrite(PIN_PWM, LOW);
   cli(); // clear Global Interrupt
-  attachInterrupt(digitalPinToInterrupt(ZERO_DETECT_PIN), zeroDetect_ISR, CHANGE);
+  //attachInterrupt(digitalPinToInterrupt(ZERO_DETECT_PIN), zeroDetect_ISR, CHANGE);
   initButtons();
   Enable_Timer0();
 
@@ -780,132 +793,103 @@ unsigned long lastZeroCrossTime = 0;  // For tracking zero-cross timing
 
 void loop()
 {
+  // --- Fade effect (unchanged) ---
   if (breathEffect) {
-    // Update fade color only if the target color changes
-    static CRGB lastFadeColor = CRGB::Black; // Track the last color used for fading
-    int currentAQI = calculateAQI(map_p25);  // Get the current AQI
-    CRGB currentFadeColor = getFadeColor(currentAQI); // Get the target color based on AQI
+    static CRGB lastFadeColor = CRGB::Black;
+    int currentAQI = calculateAQI(map_p25);
+    CRGB currentFadeColor = getFadeColor(currentAQI);
 
-    // Only start a new fade if the target color has changed
     if (currentFadeColor != lastFadeColor) {
-        lastFadeColor = currentFadeColor;
-        startFadeToColor(currentFadeColor);
+      lastFadeColor = currentFadeColor;
+      startFadeToColor(currentFadeColor);
     }
-
     handleFade();
-}
-  if ((millis() - prev_millis) > CHECK_HEPA_FILTER_STATUS)
-  {
-    Samples = 0; // Reset Samples before taking new readings
-    for (int x = 0; x < CURRENT_SAMPLES; x++)
-    { //Get 150 samples
-      AcsValue = analogRead(PIN_CURRENT_SENSE);     //Read current sensor values
-      Samples = Samples + AcsValue;  //Add samples together
-      delay (3); // let ADC settle before next sample 3ms
-    }
-    AvgAcs = Samples / CURRENT_SAMPLES_F; //Taking Average of Samples
+  }
 
-    //((AvgAcs * (5.0 / 1024.0)) is converitng the read voltage in 0-5 volts
-    //2.5 is offset(I assumed that arduino is working on 5v so the viout at no current comes
-    //out to be 2.5 which is out offset. If your arduino is working on different voltage than
-    //you must change the offset according to the input voltage)
-    //0.185v(185mV) is rise in output voltage when 1A current flows at input
-    AcsValueF = (2.5 - (AvgAcs * (5.0 / 1024.0)) ) / 0.185;
+  // --- HEPA filter monitoring ---
+  if ((millis() - prev_millis) > CHECK_HEPA_FILTER_STATUS) {
+    Samples = 0;
+    for (int x = 0; x < CURRENT_SAMPLES; x++) {
+      AcsValue = analogRead(PIN_CURRENT_SENSE);
+      Samples = Samples + AcsValue;
+      delay(3);
+    }
+    AvgAcs = Samples / CURRENT_SAMPLES_F;
+    AcsValueF = (2.5 - (AvgAcs * (5.0 / 1024.0))) / 0.185;
 
     if (AvgAcs > CHANGE_HEPA_FILTER && !flag_change_filter)
-    {
       flag_change_filter = true;
-      //gfx->drawBitmap(20, 95, filter1, 50, 50, foreColor);
-    }
     else if (AvgAcs < (CHANGE_HEPA_FILTER - HYSTERSIS_VALUE) && flag_change_filter)
-    {
       flag_change_filter = false;
-      //gfx->drawBitmap(20, 95, filter1, 50, 50, bgColor);
-    }
-    prev_millis = millis();
 
-     //Serial.println(AcsValue);
-     //Serial.println(AvgAcs);
-     //Serial.print("Avg Current : ");
-     //Serial.println(AvgAcs);      //Print the read current on Serial monitor
+    prev_millis = millis();
   }
-  if (readPMSdata(&Serial) && sysState == STATE_POWER_ON && flagTimerSet == false)
-  {
+
+  // --- PMS data and AQI logic ---
+  if (readPMSdata(&Serial) && sysState == STATE_POWER_ON && flagTimerSet == false) {
     countTimerDisp++;
-    map_p01 = data.pm10_env;  //data.pm10_standard; //map(data.particles_01um, 0, 65535, 0, 1000);
-    map_p25 = data.pm25_env;  //data.pm25_standard; //map(data.particles_25um, 0, 65535, 0, 1000);
+    map_p01 = data.pm10_env;
+    map_p25 = data.pm25_env;
     int aqi = calculateAQI(map_p25);
 
-    if (countTimerDisp > 10)
-    {
+    if (countTimerDisp > 10) {
       countTimerDisp = 0;
       if (isTimer && !isSleep)
-      {
         dispSegment((int)(ceil(float(hoursCounter) / float(ONE_HOUR_COUNT))));
-      }
-    }
-    else
-    {
-      if (!isSleep){
-      gfx->setCursor(70, 25);
-      gfx->setTextColor(foreColor, bgColor);
-      gfx->setTextSize(5);
-      // sprintf(buff, "%3d", fanSpeed);
-      sprintf(buff, "%3d", aqi);
-      gfx->print(buff);
+    } else {
+      if (!isSleep) {
+        gfx->setCursor(70, 25);
+        gfx->setTextColor(foreColor, bgColor);
+        gfx->setTextSize(5);
+        sprintf(buff, "%3d", aqi);
+        gfx->print(buff);
       }
     }
 
-    if (aqi <= PM25_LVL0_5_VAL){ // Clean Air PM25
-      NewbgColor = BLUE; // changed requirements
+    // --- AQI color zones (unchanged) ---
+    if (aqi <= PM25_LVL0_5_VAL) {
+      NewbgColor = BLUE;
       if (!breathEffect && !isSleep) {
         fill_solid(leds, NUM_LEDS, CRGB(0, 0, 255));
         FastLED.show();
       }
-    }
-    else if (aqi > PM25_LVL0_5_VAL && aqi <= PM25_LVL0_VAL) { 
-      NewbgColor = GREEN; // changed requirements
+    } else if (aqi > PM25_LVL0_5_VAL && aqi <= PM25_LVL0_VAL) {
+      NewbgColor = GREEN;
       if (!breathEffect && !isSleep) {
         fill_solid(leds, NUM_LEDS, CRGB(255, 0, 0));
         FastLED.show();
       }
-    }
-    else if (aqi > PM25_LVL0_VAL && aqi <= PM25_LVL1_VAL) {
-      NewbgColor = YELLOW; // changed requirements
+    } else if (aqi > PM25_LVL0_VAL && aqi <= PM25_LVL1_VAL) {
+      NewbgColor = YELLOW;
       if (!breathEffect && !isSleep) {
         fill_solid(leds, NUM_LEDS, CRGB(255, 255, 0));
         FastLED.show();
       }
-    }
-    else if (aqi > PM25_LVL1_VAL && aqi <= PM25_LVL2_VAL) {
+    } else if (aqi > PM25_LVL1_VAL && aqi <= PM25_LVL2_VAL) {
       NewbgColor = ORANGE;
       if (!breathEffect && !isSleep) {
         fill_solid(leds, NUM_LEDS, CRGB(165, 255, 0));
         FastLED.show();
       }
-    }
-    else if (aqi > PM25_LVL2_VAL && aqi <= PM25_LVL3_VAL) {
+    } else if (aqi > PM25_LVL2_VAL && aqi <= PM25_LVL3_VAL) {
       NewbgColor = RED;
       if (!breathEffect && !isSleep) {
         fill_solid(leds, NUM_LEDS, CRGB(0, 255, 0));
         FastLED.show();
       }
-    }
-    else if (aqi > PM25_LVL3_VAL && aqi <= PM25_LVL4_VAL) {
+    } else if (aqi > PM25_LVL3_VAL && aqi <= PM25_LVL4_VAL) {
       NewbgColor = PURPLE;
       if (!breathEffect && !isSleep) {
         fill_solid(leds, NUM_LEDS, CRGB(128, 0, 128));
         FastLED.show();
       }
-    }
-    else if (aqi > PM25_LVL4_VAL && aqi <= PM25_LVL5_VAL) {
+    } else if (aqi > PM25_LVL4_VAL && aqi <= PM25_LVL5_VAL) {
       NewbgColor = MAROON;
       if (!breathEffect && !isSleep) {
         fill_solid(leds, NUM_LEDS, CRGB(0, 128, 0));
         FastLED.show();
       }
-    }
-    else if (aqi > PM25_LVL5_VAL) {
+    } else if (aqi > PM25_LVL5_VAL) {
       NewbgColor = MAROON;
       if (!breathEffect && !isSleep) {
         fill_solid(leds, NUM_LEDS, CRGB(0, 128, 0));
@@ -913,248 +897,205 @@ void loop()
       }
     }
 
-    if (isAuto)
-    {
-      if(aqi <= 5)
+    // --- AUTO mode fan control ---
+    if (isAuto) {
+      if (aqi <= 5)
         fanSpeed = 0;
-      else if(aqi > 5 && aqi <= 25)
+      else if (aqi > 5 && aqi <= 25)
         fanSpeed = 1;
-      else if(aqi > 25 && aqi <= 50)
+      else if (aqi > 25 && aqi <= 50)
         fanSpeed = 1;
-      else if(aqi > 50 && aqi <= 75)
+      else if (aqi > 50 && aqi <= 75)
         fanSpeed = 2;
-      else if(aqi > 75 && aqi <= 100)
+      else if (aqi > 75 && aqi <= 100)
         fanSpeed = 3;
-      else if(aqi > 100)
+      else if (aqi > 100)
         fanSpeed = 3;
-        
-      if (auto_fan_speed != fanSpeed)
-      {
+
+      if (auto_fan_speed != fanSpeed) {
         set_LED_Speed(fanSpeed);
         auto_fan_speed = fanSpeed;
-        // Change state based on the fanSpeed
         switch (fanSpeed) {
-          case 0:
-            pcf8574.digitalWrite(P5, HIGH);
-            pcf8574.digitalWrite(P7, HIGH);
-            break;
-          case 1:
-            pcf8574.digitalWrite(P5, HIGH);
-            pcf8574.digitalWrite(P7, LOW);
-            break;
-          case 2:
-            pcf8574.digitalWrite(P5, LOW);
-            pcf8574.digitalWrite(P7, HIGH);
-            break;
-          case 3:
-            pcf8574.digitalWrite(P5, LOW);
-            pcf8574.digitalWrite(P7, LOW);
-            break;
-          default:
-            // All pins remain HIGH (Fan OFF)
-            pcf8574.digitalWrite(P5, HIGH);
-            pcf8574.digitalWrite(P7, HIGH);
-            break;
+          case 0: pcf8574.digitalWrite(P5, HIGH); pcf8574.digitalWrite(P7, HIGH); break;
+          case 1: pcf8574.digitalWrite(P5, HIGH); pcf8574.digitalWrite(P7, LOW); break;
+          case 2: pcf8574.digitalWrite(P5, LOW);  pcf8574.digitalWrite(P7, HIGH); break;
+          case 3: pcf8574.digitalWrite(P5, LOW);  pcf8574.digitalWrite(P7, LOW); break;
+          default: pcf8574.digitalWrite(P5, HIGH); pcf8574.digitalWrite(P7, HIGH); break;
         }
-      }      
+      }
     }
   }
 
-  if (NewbgColor != bgColor)
-  {
+  if (NewbgColor != bgColor) {
     bgColor = NewbgColor;
     onDisp();
     set_LED_Speed(fanSpeed);
-    set_LED_Auto(isAuto); // added for bug fixing version 2.2
+    set_LED_Auto(isAuto);
   }
 
-  switch (sysState)
-  {
-    case STATE_POWER_OFF:
-      {
-        if (isPowerReleased) {  // Turn ON Power
-          gfx->clearScreen();
-          play_device_on();
+  // --- Main system state machine ---
+  switch (sysState) {
+    case STATE_POWER_OFF: {
+      if (isPowerReleased) {  // Turn ON Power
+        gfx->clearScreen();
+        play_device_on();
 #ifdef DF_GFX_BL
-          digitalWrite(DF_GFX_BL, HIGH);
+        digitalWrite(DF_GFX_BL, HIGH);
 #endif
-          gfx->fillScreen(WHITE);
-          gfx->drawCircle(120, 120, CIRCLE_RAD, GREEN);
-          gfx->drawCircle(120, 120, CIRCLE_RAD + 1, GREEN);
-          gfx->drawCircle(120, 120, CIRCLE_RAD + 2, GREEN);
-          gfx->drawCircle(120, 120, CIRCLE_RAD + 3, GREEN);
-          gfx->drawBitmap(60, 60, leaf, 107, 122, GREEN);
-          delay(3000);
-          sysState = STATE_POWER_ON;
+        gfx->fillScreen(WHITE);
+        gfx->drawCircle(120, 120, CIRCLE_RAD, GREEN);
+        gfx->drawCircle(120, 120, CIRCLE_RAD + 1, GREEN);
+        gfx->drawCircle(120, 120, CIRCLE_RAD + 2, GREEN);
+        gfx->drawCircle(120, 120, CIRCLE_RAD + 3, GREEN);
+        gfx->drawBitmap(60, 60, leaf, 107, 122, GREEN);
+        delay(3000);
+
+        sysState = STATE_POWER_ON;
+        fanSpeed = 1;
+        onDisp();
+        set_LED_Speed(fanSpeed);
+        breathEffect = false;
+        isPowerReleased = false;
+        flag_change_filter = false;
+        pcf8574.digitalWrite(P5, HIGH);
+        pcf8574.digitalWrite(P7, LOW);
+
+        // Persist ON mode (Auto or Manual)
+        if (isAuto) saveStateToEEPROM(MODE_AUTO, 0);
+        else saveStateToEEPROM(MODE_MANUAL, fanSpeed);
+      }
+      break;
+    }
+
+    case STATE_POWER_ON: {
+      // --- Power OFF handling ---
+      if (isPowerReleased) {
+        play_device_off();
+        hoursCount = 0;
+        hoursCounter = 0;
+        offDisp();
+        dispSegment(DISP_OFF);
+        set_LED_Speed(0);
+        isAuto = false;
+        set_LED_Auto(isAuto);
+        fanSpeed = 0;
+        isSleep = false;
+        breathEffect = false;
+        sysState = STATE_POWER_OFF;
+        pcf8574.digitalWrite(P5, HIGH);
+        pcf8574.digitalWrite(P7, HIGH);
+        gfx->clearScreen();
+        gfx->fillScreen(BLACK);
+
+        saveStateToEEPROM(MODE_OFF, 0);   // <-- persist OFF
+        isPowerReleased = false;
+      }
+
+      // --- Fan Speed Button ---
+      if (isSpeedReleased) {
+        fanSpeed++;
+        if (fanSpeed > MAX_FAN_SPEED)
           fanSpeed = 1;
-          onDisp();
-          set_LED_Speed(fanSpeed);
-          breathEffect = false;
-          isPowerReleased = false;
-          flag_change_filter = false;
-          pcf8574.digitalWrite(P5, HIGH);
-          pcf8574.digitalWrite(P7, LOW);
+        set_LED_Speed(fanSpeed);
+
+        switch (fanSpeed) {
+          case 0: pcf8574.digitalWrite(P5, HIGH); pcf8574.digitalWrite(P7, HIGH); break;
+          case 1: pcf8574.digitalWrite(P5, HIGH); pcf8574.digitalWrite(P7, LOW); break;
+          case 2: pcf8574.digitalWrite(P5, LOW);  pcf8574.digitalWrite(P7, HIGH); break;
+          case 3: pcf8574.digitalWrite(P5, LOW);  pcf8574.digitalWrite(P7, LOW); break;
+          default: pcf8574.digitalWrite(P5, HIGH); pcf8574.digitalWrite(P7, HIGH); break;
         }
-        break;
+
+        // Save new fan speed if in manual mode
+        if (!isAuto) saveStateToEEPROM(MODE_MANUAL, fanSpeed);
+
+        play_menu_up();
+        isSpeedReleased = false;
       }
-    case STATE_POWER_ON:
-      {
-        if (isPowerReleased) {  // Turn OFF Power
-          play_device_off();
-          // gfx->clearScreen();
-          // gfx->fillScreen(BLACK);
+
+      // --- Timer Button ---
+      if (isTimerReleased) {
+        isTimer = false;
+        msCount = 0;
+        flagTimerSet = true;
+        hoursCount++;
+        if (hoursCount > MAX_HOURS)
           hoursCount = 0;
-          hoursCounter = 0;
-          offDisp();
+        dispSegment(hoursCount);
+        hoursCounter = hoursCount * ONE_HOUR_COUNT;
+        if (hoursCounter == 0)
           dispSegment(DISP_OFF);
-          set_LED_Speed(0);
-          isAuto = false;
-          set_LED_Auto(isAuto);
-          fanSpeed = 0;
-          isSleep = false;
-          breathEffect = false;
-          sysState = STATE_POWER_OFF;
-          pcf8574.digitalWrite(P5, HIGH);
-          pcf8574.digitalWrite(P7, HIGH);
-          gfx->clearScreen();
-          gfx->fillScreen(BLACK);
-          isPowerReleased = false;
-        }
-        if (isSpeedReleased) {
-          fanSpeed = fanSpeed + 1;
-          if (fanSpeed > MAX_FAN_SPEED)
-            fanSpeed = 1;
-          set_LED_Speed(fanSpeed);
-
-          // Change state based on the fanSpeed
-          switch (fanSpeed) {
-              case 0:
-                  pcf8574.digitalWrite(P5, HIGH);
-                  pcf8574.digitalWrite(P7, HIGH);
-                  break;
-              case 1:
-                  pcf8574.digitalWrite(P5, HIGH);
-                  pcf8574.digitalWrite(P7, LOW);
-                  break;
-              case 2:
-                  pcf8574.digitalWrite(P5, LOW);
-                  pcf8574.digitalWrite(P7, HIGH);
-                  break;
-              case 3:
-                  pcf8574.digitalWrite(P5, LOW);
-                  pcf8574.digitalWrite(P7, LOW);
-                  break;
-              default:
-                  // All pins remain HIGH (Fan OFF)
-                  pcf8574.digitalWrite(P5, HIGH); // Medium speed
-                  pcf8574.digitalWrite(P7, HIGH); // Low speed
-                  break;
-          }
-          play_menu_up();
-          // Reset the `isSpeedReleased` flag to wait for the next button press
-          isSpeedReleased = false;
-        }
-        if (isTimerReleased) {
-          isTimer = false;
-          msCount = 0;
-          flagTimerSet = true;
-          hoursCount++;
-          if (hoursCount > MAX_HOURS)
-            hoursCount = 0;
-          dispSegment(hoursCount);
-          hoursCounter = hoursCount * ONE_HOUR_COUNT;
-          if (hoursCounter == 0)
-            dispSegment(DISP_OFF);
-          else
-            isTimer = true;
-          isTimerReleased = false;
-          play_menu_up();
-        }
-        if (isAutoReleased) {
-          if (autoEnableCounter > AUTO_MAX_COUNTER) {
-            autoEnableCounter = 0;
-          }
-          else {
-            isAuto = !isAuto;
-            set_LED_Auto(isAuto);
-            autoEnableCounter = 0;
-          }
-          isAutoReleased = false;
-          isLongPress = false;
-          play_menu_down();
-        }
-
-
-        if (isSleepReleased) {
-          // if (!isSleep) {
-          //   fill_solid(leds, NUM_LEDS, CRGB::Black); // Ensure LEDs are initially off
-          //   FastLED.show();
-          //   offDisp();
-          //   dispSegment(DISP_OFF);
-          //   // fill_solid(leds, NUM_LEDS, CRGB(0, 0, 0));
-          //   isSleep = true;
-          //   play_device_off();
-          // } else if (isSleep) {
-          //   isSleep = false;
-          //   if (isTimer)
-          //   dispSegment(hoursCount);
-          //   onDisp();
-          //   LEDs_Restore();
-          //   play_device_on();
-          // }
-          // isSleepReleased = false;
-          SleepMode = SleepMode + 1;
-          if (SleepMode > MAX_Sleep_Mode)
-          SleepMode = 0;
-          switch(SleepMode){
-                 case 0:
-                      isSleep = false;
-                      if (isTimer)
-                      dispSegment(hoursCount);
-                      onDisp();
-                      LEDs_Restore();
-                      play_device_on();
-                      break;
-                 case 1:
-                      isSleep = true;
-                       breathEffect = false;                               
-                      fill_solid(leds, NUM_LEDS, CRGB::Black); // Ensure LEDs are initially off
-                      FastLED.show();
-                      break;  
-                 case 2:
-                      offDisp();
-                      dispSegment(DISP_OFF);
-                    //   // fill_solid(leds, NUM_LEDS, CRGB(0, 0, 0));
-                      isSleep = true;
-                      breathEffect = false;
-                      play_device_off(); 
-                      break;  
-                 default:
-                      isSleep = false;
-                      if (isTimer)
-                      dispSegment(hoursCount);
-                      onDisp();
-                      LEDs_Restore();
-                      play_device_on();
-                      break;                   
-          }
-          play_menu_up();
-          // Reset the `isSpeedReleased` flag to wait for the next button press
-          isSleepReleased = false;
-        
-        }
-  //         }
-             
-  //       }
-  //       break;
-  //     }
-  //   default:
-  //     break;
-  // }
-
+        else
+          isTimer = true;
+        isTimerReleased = false;
+        play_menu_up();
       }
+
+      // --- Auto Button ---
+      if (isAutoReleased) {
+        if (autoEnableCounter > AUTO_MAX_COUNTER)
+          autoEnableCounter = 0;
+        else {
+          isAuto = !isAuto;
+          set_LED_Auto(isAuto);
+          autoEnableCounter = 0;
+
+          // Save mode change
+          if (isAuto) saveStateToEEPROM(MODE_AUTO, 0);
+          else saveStateToEEPROM(MODE_MANUAL, fanSpeed);
+        }
+        isAutoReleased = false;
+        isLongPress = false;
+        play_menu_down();
+      }
+
+      // --- Sleep Button ---
+      if (isSleepReleased) {
+        SleepMode++;
+        if (SleepMode > MAX_Sleep_Mode)
+          SleepMode = 0;
+
+        switch (SleepMode) {
+          case 0:
+            isSleep = false;
+            if (isTimer) dispSegment(hoursCount);
+            onDisp();
+            LEDs_Restore();
+            play_device_on();
+            break;
+
+          case 1:
+            isSleep = true;
+            breathEffect = false;
+            fill_solid(leds, NUM_LEDS, CRGB::Black);
+            FastLED.show();
+            break;
+
+          case 2:
+            offDisp();
+            dispSegment(DISP_OFF);
+            isSleep = true;
+            breathEffect = false;
+            play_device_off();
+            break;
+
+          default:
+            isSleep = false;
+            if (isTimer) dispSegment(hoursCount);
+            onDisp();
+            LEDs_Restore();
+            play_device_on();
+            break;
+        }
+
+        play_menu_up();
+        isSleepReleased = false;
+      }
+      break;
+    }
   }
 }
+
 
 void onDisp(void)
 {
@@ -1226,17 +1167,17 @@ void offDisp(void)
   FastLED.show();
 }
 
-void zeroDetect_ISR() {
-  if (digitalRead(ZERO_DETECT_PIN) == 1 && fanSpeed != 0) {
-    pwmCount = 10;
-    digitalWrite(PIN_PWM, LOW);
-    if (fanSpeed == MAX_FAN_SPEED)
-      digitalWrite(PIN_PWM, HIGH);
-      // delayMicroseconds(10); // Maintain the pulse width for the triac
-      // digitalWrite(PIN_PWM, LOW);
-    flagON = true;
-  }
-}
+// void zeroDetect_ISR() {
+//   if (digitalRead(ZERO_DETECT_PIN) == 1 && fanSpeed != 0) {
+//     pwmCount = 10;
+//     digitalWrite(PIN_PWM, LOW);
+//     if (fanSpeed == MAX_FAN_SPEED)
+//       digitalWrite(PIN_PWM, HIGH);
+//       // delayMicroseconds(10); // Maintain the pulse width for the triac
+//       // digitalWrite(PIN_PWM, LOW);
+//     flagON = true;
+//   }
+// }
 
 int calculateAQI(uint16_t pm25) {
   uint16_t Clow, Chigh;
@@ -1537,4 +1478,74 @@ void play_menu_down(void)
   pcf8574.digitalWrite(P3, LOW);
   delay(MUSIC_PLAY_TIME);
   pcf8574.digitalWrite(P3, HIGH);
+}
+void saveStateToEEPROM(byte mode, byte speed) {
+  if (EEPROM.read(EEPROM_ADDR_MODE) != mode) EEPROM.write(EEPROM_ADDR_MODE, mode);
+  if (EEPROM.read(EEPROM_ADDR_SPEED) != speed) EEPROM.write(EEPROM_ADDR_SPEED, speed);
+}
+
+void restoreState()
+{
+  // ---------- Restore previous mode & speed from EEPROM ----------
+  {
+    uint8_t storedMode = EEPROM.read(EEPROM_ADDR_MODE);
+    uint8_t storedSpeed = EEPROM.read(EEPROM_ADDR_SPEED);
+
+    // default fallback checks
+    if (storedSpeed > 3) storedSpeed = 1; // safe fallback
+
+    switch (storedMode) {
+      case MODE_OFF:
+        sysState = STATE_POWER_OFF;
+        isAuto = false;
+        fanSpeed = 0;
+        breathEffect = false;
+        flag_change_filter = false;
+        // Ensure outputs reflect OFF
+        pcf8574.digitalWrite(P5, HIGH);
+        pcf8574.digitalWrite(P7, HIGH);
+        offDisp();
+        break;
+
+      case MODE_AUTO:
+        sysState = STATE_POWER_ON;
+        isAuto = true;
+        fanSpeed = 1; // initial; real control will be set by AQI later
+        breathEffect = false;
+        flag_change_filter = false;
+        set_LED_Speed(fanSpeed);
+        set_LED_Auto(isAuto);
+        // do not force pcf8574 fully here — auto mode logic will set relays when PMS gives data
+        break;
+
+      case MODE_MANUAL:
+        sysState = STATE_POWER_ON;
+        isAuto = false;
+        fanSpeed = storedSpeed;
+        breathEffect = false;
+        flag_change_filter = false;
+        set_LED_Speed(fanSpeed);
+        set_LED_Auto(isAuto);
+        // set fan output according to fanSpeed
+        switch (fanSpeed) {
+          case 0: pcf8574.digitalWrite(P5, HIGH); pcf8574.digitalWrite(P7, HIGH); break;
+          case 1: pcf8574.digitalWrite(P5, HIGH); pcf8574.digitalWrite(P7, LOW);  break;
+          case 2: pcf8574.digitalWrite(P5, LOW);  pcf8574.digitalWrite(P7, HIGH); break;
+          case 3: pcf8574.digitalWrite(P5, LOW);  pcf8574.digitalWrite(P7, LOW);  break;
+          default: pcf8574.digitalWrite(P5, HIGH); pcf8574.digitalWrite(P7, HIGH); break;
+        }
+        break;
+
+      default:
+        // unknown contents -> treat as OFF
+        sysState = STATE_POWER_OFF;
+        isAuto = false;
+        fanSpeed = 0;
+        offDisp();
+        pcf8574.digitalWrite(P5, HIGH);
+        pcf8574.digitalWrite(P7, HIGH);
+        break;
+    }
+  }
+  // ---------- end restore ----------
 }
