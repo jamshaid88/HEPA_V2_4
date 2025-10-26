@@ -706,10 +706,7 @@ void handleFade()
 
   float angle = (2.0 * PI * fadeStep) / fadeSteps;  // Full sine wave cycle (0 to 2*PI)
   float brightnessValue = (sin(angle) + 1.0) / 2.0; // Map sine wave (-1 to 1) to (0 to 1)
-  // int brightness = brightnessValue * 255; // Map to 0 to 255 brightness range
   int brightness = (brightnessValue * (255 - minBrightness)) + minBrightness;
-  // Adjust brightness range for deeper dimming
-  // brightness = map(brightness, 0, 255, 0, 255); // Lower the maximum brightness to make it dim closer to black
 
   // Apply brightness to all LEDs
   fill_solid(leds, NUM_LEDS, currentTargetColor);
@@ -779,7 +776,6 @@ CRGB getFadeColor(int aqi)
 
 void setup(void)
 {
-  // FastLED.addLeds<WS2812B, DATA_PIN>(leds, NUM_LEDS);
   FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS);
   init_pcf();
   gfx->begin();
@@ -1197,7 +1193,6 @@ void loop()
 void onDisp(void)
 {
   gfx->clearScreen();
-  // gfx->begin();
   if (sysState == STATE_POWER_ON)
   {
 #ifdef DF_GFX_BL
@@ -1216,8 +1211,6 @@ void onDisp(void)
       gfx->setTextSize(5);
       int aqi = calculateAQI(map_p25);
       sprintf(buff, "%3d", aqi);
-      // sprintf(buff, "%3d", fanSpeed);
-
       gfx->print(buff);
     }
   }
@@ -1240,14 +1233,11 @@ void onDisp_power_on(void)
   gfx->setTextSize(5);
   int aqi = calculateAQI(map_p25);
   sprintf(buff, "%3d", aqi);
-  // sprintf(buff, "%3d", fanSpeed);
   gfx->print(buff);
 }
 
 void offDisp(void)
 {
-  // fill_solid(leds, NUM_LEDS, CRGB(0, 0, 255));
-  // FastLED.show();
   gfx->fillScreen(BLACK);
   gfx->clearScreen();
   dispSegment(DISP_OFF);
@@ -1258,7 +1248,6 @@ void offDisp(void)
 #endif
   gfx->clearScreen();
   gfx->fillScreen(BLACK);
-  // fill_solid(leds, NUM_LEDS, CRGB(0, 0, 0));
   FastLED.clear();
   FastLED.show();
 }
